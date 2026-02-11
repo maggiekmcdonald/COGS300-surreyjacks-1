@@ -14,8 +14,9 @@ const int in4 = 5;
 const int threshold = 475; // adjust after testing
 
 // Base speed
-const int baseSpeed = 180;
-const int turnSpeed = 120;
+const int baseSpeed = 25;
+const int turnSpeed = 35;
+
 
 void setup() {
   pinMode(leftSensor, INPUT);
