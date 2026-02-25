@@ -1,0 +1,244 @@
+// Object Detection Robot - Continuous Rotation Servo Sweep
+// Servo spins 360°, readings taken at timed intervals to approximate angles.
+// Uses a Bayes-style probability map to distinguish object from wall.
+
+#include <Servo.h>
+
+// ── Motor pins ────────────────────────────────────────────────────────────────
+#define enA 10
+#define in1 6
+#define in2 3
+#define in3 5
+#define in4 4
+#define enB 11
+
+// ── Ultrasonic pins ───────────────────────────────────────────────────────────
+#define TRIG_PIN 7
+#define ECHO_PIN 8
+
+// ── Servo pin ─────────────────────────────────────────────────────────────────
+#define SERVO_PIN 9
+Servo sonarServo;
+
+// ── Continuous rotation servo calibration ────────────────────────────────────
+// 90  = stop (dead stop value — tune SERVO_STOP if it drifts)
+// <90 = clockwise, >90 = counter-clockwise (or reversed, depends on your servo)
+#define SERVO_STOP  90    // ← tune until servo truly stops
+#define SERVO_CW    75    // clockwise spin speed
+#define SERVO_CCW   105   // counter-clockwise spin speed (not used right now)
+
+// ── Sweep configuration ───────────────────────────────────────────────────────
+// TIME_FOR_360_MS: measure how long your servo takes for one full rotation.
+// Method: write SERVO_CW, put a piece of tape on it, time 10 rotations / 10.
+#define TIME_FOR_360_MS  2000   // ← TUNE THIS
+#define NUM_ANGLES       16     // 16 slices = 22.5° per step
+
+const int STEP_DELAY = TIME_FOR_360_MS / NUM_ANGLES;  // ms between each reading
+
+// ── Depth & probability maps ──────────────────────────────────────────────────
+float depthMap[NUM_ANGLES];
+float probMap[NUM_ANGLES];
+
+// ── Driving tuning ────────────────────────────────────────────────────────────
+const float CLOSE_ENOUGH_CM = 12.0;
+const int   DRIVE_SPEED     = 110;
+const int   TURN_SPEED      = 120;
+// ms per degree of in-place turn — test with turnByDegrees(90) and adjust
+const float MS_PER_DEGREE   = 7.0;   // ← TUNE THIS
+
+// ── State machine ─────────────────────────────────────────────────────────────
+enum State { SWEEP, DRIVE_FORWARD };
+State robotState = SWEEP;
+
+// ─────────────────────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(enA, OUTPUT); pinMode(in1, OUTPUT); pinMode(in2, OUTPUT);
+  pinMode(in3, OUTPUT); pinMode(in4, OUTPUT); pinMode(enB, OUTPUT);
+  stopMotors();
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  sonarServo.attach(SERVO_PIN);
+  sonarServo.write(SERVO_STOP);
+  delay(500);
+
+  // Uniform prior — no idea where anything is yet
+  for (int i = 0; i < NUM_ANGLES; i++) probMap[i] = 1.0 / NUM_ANGLES;
+
+  delay(1000);
+  Serial.println("Ready.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+void loop() {
+  switch (robotState) {
+
+    case SWEEP: {
+      doSweep();
+      updateBayesMap();
+      printMaps();
+
+      int targetIdx = findTarget();
+      float turnDeg = indexToCarAngle(targetIdx);
+
+      Serial.print("Target index: ");    Serial.print(targetIdx);
+      Serial.print("  turn needed: ");   Serial.print(turnDeg);
+      Serial.println("°");
+
+      turnByDegrees(turnDeg);
+      delay(200);
+      robotState = DRIVE_FORWARD;
+      break;
+    }
+
+    case DRIVE_FORWARD: {
+      float dist = readUltrasonic();
+      Serial.print("dist = "); Serial.println(dist);
+
+      if (dist <= CLOSE_ENOUGH_CM) {
+        stopMotors();
+        Serial.println("Reached object!");
+        delay(3000);
+        for (int i = 0; i < NUM_ANGLES; i++) probMap[i] = 1.0 / NUM_ANGLES;
+        robotState = SWEEP;
+      } else {
+        driveForward();
+        // Re-sweep every 600 ms to correct course
+        static unsigned long lastSweep = 0;
+        if (millis() - lastSweep > 600) {
+          lastSweep = millis();
+          stopMotors();
+          delay(100);
+          robotState = SWEEP;
+        }
+      }
+      break;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SWEEP: spin servo one full revolution, sample at equal time intervals.
+// Index 0 = wherever the sensor physically points at sweep start.
+// If you always start with sensor pointing forward, index 0 = straight ahead.
+// ─────────────────────────────────────────────────────────────────────────────
+void doSweep() {
+  Serial.println("Sweeping...");
+  sonarServo.write(SERVO_CW);
+
+  for (int i = 0; i < NUM_ANGLES; i++) {
+    delay(STEP_DELAY);
+    depthMap[i] = readUltrasonic();
+  }
+
+  sonarServo.write(SERVO_STOP);
+  delay(300);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Convert array index → angle relative to car forward direction.
+// Assumes index 0 = forward (0°). Positive = right, negative = left.
+// Adjust sweepStartOffset if your sensor doesn't start pointing forward.
+// ─────────────────────────────────────────────────────────────────────────────
+float indexToCarAngle(int idx) {
+  const int sweepStartOffset = 0;   // ← change if sensor starts elsewhere
+  float deg = idx * (360.0 / NUM_ANGLES) + sweepStartOffset;
+  // Normalise to -180 … +180 (shortest turn)
+  while (deg >  180) deg -= 360;
+  while (deg < -180) deg += 360;
+  return deg;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BAYES UPDATE
+// Likelihood: closer readings are more likely to be the target object.
+// Bump bonus: if a reading is much closer than its neighbours on both sides,
+// it looks like a discrete object rather than a flat wall — reward it.
+// ─────────────────────────────────────────────────────────────────────────────
+void updateBayesMap() {
+  float likelihood[NUM_ANGLES];
+  float sum = 0;
+
+  for (int i = 0; i < NUM_ANGLES; i++) {
+    float d = depthMap[i];
+    if (d <= 0 || d > 400) d = 400;
+
+    float L = 1.0 / d;   // base: closer = more likely
+
+    // Wrap-around neighbours (360° so index 0 and 15 are adjacent)
+    int prev = (i - 1 + NUM_ANGLES) % NUM_ANGLES;
+    int next = (i + 1) % NUM_ANGLES;
+    float dp = depthMap[prev]; if (dp <= 0 || dp > 400) dp = 400;
+    float dn = depthMap[next]; if (dn <= 0 || dn > 400) dn = 400;
+
+    float bump = (dp + dn) / 2.0 - d;  // positive when this index is closer than neighbours
+    if (bump > 0) L *= (1.0 + bump / 15.0);
+
+    likelihood[i] = L * probMap[i];
+    sum += likelihood[i];
+  }
+
+  for (int i = 0; i < NUM_ANGLES; i++)
+    probMap[i] = (sum > 0) ? likelihood[i] / sum : 1.0 / NUM_ANGLES;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+int findTarget() {
+  int best = 0;
+  for (int i = 1; i < NUM_ANGLES; i++)
+    if (probMap[i] > probMap[best]) best = i;
+  return best;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+float readUltrasonic() {
+  digitalWrite(TRIG_PIN, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long dur = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (dur == 0) return 400.0;
+  return dur * 0.034 / 2.0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+void driveForward() {
+  analogWrite(enA, DRIVE_SPEED); analogWrite(enB, DRIVE_SPEED);
+  digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);  digitalWrite(in4, HIGH);
+}
+
+void stopMotors() {
+  digitalWrite(in1, LOW); digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW); digitalWrite(in4, LOW);
+}
+
+// Positive deg = turn right, negative = turn left
+void turnByDegrees(float deg) {
+  if (abs(deg) < 4) return;
+  int ms = abs((int)(deg * MS_PER_DEGREE));
+  analogWrite(enA, TURN_SPEED); analogWrite(enB, TURN_SPEED);
+  if (deg > 0) {
+    digitalWrite(in1, LOW);  digitalWrite(in2, HIGH);
+    digitalWrite(in3, LOW);  digitalWrite(in4, HIGH);
+  } else {
+    digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
+    digitalWrite(in3, HIGH); digitalWrite(in4, LOW);
+  }
+  delay(ms);
+  stopMotors();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+void printMaps() {
+  Serial.println("Idx | Car Angle | Distance | Probability");
+  for (int i = 0; i < NUM_ANGLES; i++) {
+    Serial.print(i);          Serial.print("   |  ");
+    Serial.print(indexToCarAngle(i), 1); Serial.print("°  |  ");
+    Serial.print(depthMap[i], 1);        Serial.print(" cm  |  ");
+    Serial.println(probMap[i], 4);
+  }
+  Serial.println("---");
+}
