@@ -1,5 +1,4 @@
-// Object Detection Robot
-// Sweeps 180° back and forth (windshield wiper), drives toward closest object.
+// Object Detection Robot — fixed sweep timing + wire tangle prevention
 
 #include <Servo.h>
 
@@ -19,27 +18,28 @@
 #define SERVO_PIN 9
 Servo sonarServo;
 
-// Tune SERVO_STOP until the servo truly doesn't move.
-// Try 89 or 91 if it drifts.
-#define SERVO_STOP 90
-#define SERVO_CW   75    // spins one way
-#define SERVO_CCW  105   // spins the other way
+#define SERVO_STOP  90   // tune 89 or 91 if it still drifts
+#define SERVO_CW    75   // forward sweep direction (always CW)
+#define SERVO_CCW  105   // used ONLY for fast rewind
 
 // ── Sweep config ──────────────────────────────────────────────────────────────
-// Measure: write SERVO_CW, time a full 360°, divide by 2 for 180°.
-#define TIME_FOR_180_MS 1000   // ← TUNE THIS
+// TIME_FOR_180_MS: write SERVO_CW, time a 180° arc with a stopwatch, use that value.
+#define TIME_FOR_180_MS  1000   // ← TUNE THIS
 
-#define NUM_ANGLES 9           // 9 readings across 180° = 22.5° steps
-const int STEP_DELAY = TIME_FOR_180_MS / NUM_ANGLES;
+#define NUM_ANGLES 9
+// Each step must account for readUltrasonic() taking up to 30ms.
+// STEP_DELAY is the extra wait ON TOP of the sensor read time.
+const int SENSOR_READ_MS = 30;   // pulseIn timeout ceiling
+const int STEP_DELAY = (TIME_FOR_180_MS / NUM_ANGLES) - SENSOR_READ_MS;
 
 // ── Depth map ─────────────────────────────────────────────────────────────────
 float depthMap[NUM_ANGLES];
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-const float CLOSE_ENOUGH_CM = 12.0;  // stop when this close to object
+const float CLOSE_ENOUGH_CM = 12.0;
 const int   DRIVE_SPEED     = 110;
 const int   TURN_SPEED      = 120;
-const float MS_PER_DEGREE   = 7.0;   // ← TUNE: run turnByDegrees(90), measure actual degrees
+const float MS_PER_DEGREE   = 7.0;   // ← TUNE: run turnByDegrees(90), check actual angle
 
 // ── Drive duration between re-sweeps ─────────────────────────────────────────
 #define DRIVE_DURATION_MS 800
@@ -47,8 +47,6 @@ const float MS_PER_DEGREE   = 7.0;   // ← TUNE: run turnByDegrees(90), measure
 // ── State machine ─────────────────────────────────────────────────────────────
 enum State { SWEEP, DRIVE_FORWARD };
 State robotState = SWEEP;
-
-bool sweepCW = true;   // alternates each sweep for windshield wiper motion
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
@@ -64,6 +62,10 @@ void setup() {
   sonarServo.attach(SERVO_PIN);
   sonarServo.write(SERVO_STOP);
   delay(500);
+
+  if (STEP_DELAY <= 0) {
+    Serial.println("WARNING: TIME_FOR_180_MS too small — increase it!");
+  }
   Serial.println("Ready.");
 }
 
@@ -76,19 +78,14 @@ void loop() {
       printMap();
 
       int targetIdx = findClosest();
-
-      // Index 0 = -90° (left), index 4 = 0° (forward), index 8 = +90° (right).
-      // When sweeping CCW the array is filled right-to-left, so flip the index.
-      int mappedIdx = sweepCW ? targetIdx : (NUM_ANGLES - 1 - targetIdx);
-      float turnDeg = indexToAngle(mappedIdx);
+      // Index 0 = -90° (left), index 4 = 0° (forward), index 8 = +90° (right)
+      // Sweep is always CW, so index order is always left→right. No flip needed.
+      float turnDeg = indexToAngle(targetIdx);
 
       Serial.print("Closest at index "); Serial.print(targetIdx);
-      Serial.print(" -> car angle ");    Serial.print(turnDeg);
-      Serial.print("°  dist ");         Serial.print(depthMap[targetIdx]);
+      Serial.print(" -> turn ");         Serial.print(turnDeg);
+      Serial.print("°  dist ");          Serial.print(depthMap[targetIdx]);
       Serial.println(" cm");
-
-      // Alternate sweep direction for next time
-      sweepCW = !sweepCW;
 
       if (depthMap[targetIdx] <= CLOSE_ENOUGH_CM) {
         Serial.println("Already close enough!");
@@ -115,17 +112,28 @@ void loop() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Always sweeps CW (left → right), then fast-rewinds CCW to start position.
+// This prevents wires from accumulating twist over multiple sweeps.
 void doSweep() {
-  Serial.print("Sweeping "); Serial.println(sweepCW ? "CW" : "CCW");
-  sonarServo.write(sweepCW ? SERVO_CW : SERVO_CCW);
+  Serial.println("Sweeping CW...");
+  sonarServo.write(SERVO_CW);
 
   for (int i = 0; i < NUM_ANGLES; i++) {
-    delay(STEP_DELAY);
+    // Read FIRST, then wait — so the delay pads the gap between readings,
+    // not before the first one. Keeps timing consistent.
     depthMap[i] = readUltrasonic();
+    if (STEP_DELAY > 0) delay(STEP_DELAY);
   }
 
   sonarServo.write(SERVO_STOP);
   delay(200);
+
+  // ── Rewind: spin CCW for the same duration to return to start ──────────────
+  Serial.println("Rewinding...");
+  sonarServo.write(SERVO_CCW);
+  delay(TIME_FOR_180_MS);
+  sonarServo.write(SERVO_STOP);
+  delay(300);   // let it settle before next sweep
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +145,7 @@ int findClosest() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Index 0 = -90° (left of robot), index 4 = 0° (straight ahead), index 8 = +90° (right)
 float indexToAngle(int idx) {
   return -90.0 + idx * (180.0 / (NUM_ANGLES - 1));
 }
@@ -163,15 +172,15 @@ void stopMotors() {
   digitalWrite(in3, LOW); digitalWrite(in4, LOW);
 }
 
-// Positive = turn right, negative = turn left
+// Positive deg = turn right, negative deg = turn left
 void turnByDegrees(float deg) {
   if (abs(deg) < 4) return;
   int ms = abs((int)(deg * MS_PER_DEGREE));
   analogWrite(enA, TURN_SPEED); analogWrite(enB, TURN_SPEED);
-  if (deg > 0) {
+  if (deg > 0) {                            // turn right: A backward, B forward
     digitalWrite(in1, LOW);  digitalWrite(in2, HIGH);
     digitalWrite(in3, LOW);  digitalWrite(in4, HIGH);
-  } else {
+  } else {                                  // turn left: A forward, B backward
     digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
     digitalWrite(in3, HIGH); digitalWrite(in4, LOW);
   }
@@ -183,10 +192,9 @@ void turnByDegrees(float deg) {
 void printMap() {
   Serial.println("Idx | Angle  | Distance");
   for (int i = 0; i < NUM_ANGLES; i++) {
-    int mappedIdx = sweepCW ? i : (NUM_ANGLES - 1 - i);
     Serial.print(i);
     Serial.print("   |  ");
-    Serial.print(indexToAngle(mappedIdx), 1);
+    Serial.print(indexToAngle(i), 1);
     Serial.print("°  |  ");
     Serial.print(depthMap[i], 1);
     Serial.println(" cm");
