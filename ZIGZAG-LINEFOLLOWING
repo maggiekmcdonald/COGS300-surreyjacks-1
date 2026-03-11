@@ -53,30 +53,30 @@ void loop() {
 
   // --- Line detected: use original logic exactly ---
 
-  if (R == 0 && L == 1) {
-    // Right sensor on line → turn right (original behavior)
+  if (R == 1 && L == 0) {
+    // Right sensor on white tape → turn right
     inGrace = false;
     inSearch = false;
     lastTurn = 1;
     turnRight();
   }
-  else if (R == 1 && L == 0) {
-    // Left sensor on line → turn left (original behavior)
+  else if (R == 0 && L == 1) {
+    // Left sensor on white tape → turn left
     inGrace = false;
     inSearch = false;
     lastTurn = 2;
     turnLeft();
   }
-  else if (R == 0 && L == 0) {
-    // Both on line → stop (original behavior)
+  else if (R == 1 && L == 1) {
+    // Both on white tape → stop
     inGrace = false;
     inSearch = false;
     Stop();
   }
 
-  // --- Both white: NEW recovery logic ---
+  // --- Both on black floor (off the tape): recovery logic ---
 
-  else if (R == 1 && L == 1) {
+  else if (R == 0 && L == 0) {
 
     if (!inGrace && !inSearch) {
       // Just lost the line — start grace timer
