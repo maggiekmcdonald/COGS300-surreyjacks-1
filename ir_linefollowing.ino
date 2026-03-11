@@ -33,7 +33,7 @@ void loop(){
 if((digitalRead(R_S) == 1)&&(digitalRead(L_S) == 1)){forward();}   //if Right Sensor and Left Sensor are at White color then it will call forword function
 if((digitalRead(R_S) == 0)&&(digitalRead(L_S) == 1)){turnRight();} //if Right Sensor is Black and Left Sensor is White then it will call turn Right function  
 if((digitalRead(R_S) == 1)&&(digitalRead(L_S) == 0)){turnLeft();}  //if Right Sensor is White and Left Sensor is Black then it will call turn Left function
-if((digitalRead(R_S) == 0)&&(digitalRead(L_S) == 0)){Stop();} //if Right Sensor and Left Sensor are at Black color then it will call Stop function
+if((digitalRead(R_S) == 0)&&(digitalRead(L_S) == 0)){turnRight();} //if Right Sensor and Left Sensor are at Black color then it will call Stop function
 }
 
 void forward(){
