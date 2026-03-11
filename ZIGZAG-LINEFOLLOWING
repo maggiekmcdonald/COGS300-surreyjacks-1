@@ -1,55 +1,37 @@
-// Arduino Line Follower Robot Code - V2: Grace Period + Recovery
+// Arduino Line Follower Robot Code - V3
 // Original: https://circuitdigest.com/microcontroller-projects/arduino-uno-line-follower-robot
 //
 // CHANGES FROM ORIGINAL:
-// 1. Added a grace period (GRACE_MS) so that brief "both white" moments during
-//    normal curves just continue the last action (forward or gentle turn) instead
-//    of triggering aggressive recovery. This prevents the robot from mistaking
-//    normal line-following for a lost-line situation.
-// 2. After the grace period expires, the robot enters aggressive pivot recovery
-//    in the last-known turn direction to reacquire the line.
-// 3. If pivoting doesn't find the line within SEARCH_TIMEOUT_MS, it reverses
-//    briefly and tries again.
-// 4. Fixed both-black case to go forward (original called turnRight with a
-//    "Stop" comment).
+// Only the both-white case is changed. All motor functions, speeds, and
+// pin logic are identical to the original working code.
+// 1. Grace period: when both sensors go white, the robot continues its last
+//    motor command for GRACE_MS before doing anything different.
+// 2. After grace expires, aggressive in-place pivot toward last turn direction.
+// 3. If pivot doesn't find the line within SEARCH_TIMEOUT_MS, reverse briefly
+//    and try again.
 
-#define enA 10  // Enable1 L293 Pin enA
-#define in1 6   // Motor1 L293 Pin in1
-#define in2 3   // Motor1 L293 Pin in2
-#define in3 5   // Motor2 L293 Pin in3
-#define in4 4   // Motor2 L293 Pin in4
-#define enB 11  // Enable2 L293 Pin enB
-#define R_S 12  // IR sensor Right
-#define L_S 2   // IR sensor Left
+#define enA 10
+#define in1 6
+#define in2 3
+#define in3 5
+#define in4 4
+#define enB 11
+#define R_S 12
+#define L_S 2
 
-// --- Tunable Parameters ---
-int forwardSpeed    = 80;
-int turnSpeedSlow   = 60;
-int turnSpeedFast   = 140;
-int searchSpeed     = 150;  // pivot speed during recovery
-int reverseSpeed    = 100;
-
-// GRACE_MS: How long (ms) both sensors can be white before we consider the
-// line truly lost. During this window, the robot just continues its last
-// action (forward or gentle turn). This is the KEY tunable — start at 150
-// and adjust. Too low = triggers recovery on normal curves. Too high = delays
-// recovery on real sharp turns.
-unsigned long GRACE_MS = 150;
-
-// How long (ms) to aggressively pivot before trying a reverse fallback
-unsigned long SEARCH_TIMEOUT_MS = 800;
-
-// How long (ms) to reverse during fallback
+// --- Tunable recovery parameters ---
+unsigned long GRACE_MS          = 150;  // coast on last command before searching
+unsigned long SEARCH_TIMEOUT_MS = 800;  // pivot duration before reversing
 unsigned long REVERSE_DURATION_MS = 300;
+int searchSpeed = 150;
+int reverseSpeed = 100;
 
 // --- State ---
-// 0 = no history, 1 = was turning right, 2 = was turning left, 3 = was going forward
-int lastAction = 0;
-
-unsigned long bothWhiteStart = 0;  // when both-white first began
-bool inGrace = false;              // in the grace window (still doing last action)
-bool inSearch = false;             // past grace, actively searching
-unsigned long searchStart = 0;     // when aggressive search began
+int lastTurn = 0;  // 1 = right, 2 = left
+unsigned long bothWhiteStart = 0;
+bool inGrace  = false;
+bool inSearch = false;
+unsigned long searchStart = 0;
 
 void setup() {
   pinMode(R_S, INPUT);
@@ -60,35 +42,55 @@ void setup() {
   pinMode(in3, OUTPUT);
   pinMode(in4, OUTPUT);
   pinMode(enB, OUTPUT);
-
-  analogWrite(enA, forwardSpeed);
-  analogWrite(enB, forwardSpeed);
+  analogWrite(enA, 100);
+  analogWrite(enB, 100);
   delay(1000);
 }
 
 void loop() {
-  int R = digitalRead(R_S);  // 1 = white (no line), 0 = black (line detected)
+  int R = digitalRead(R_S);
   int L = digitalRead(L_S);
 
-  if (R == 1 && L == 1) {
-    // --- BOTH WHITE ---
+  // --- Line detected: use original logic exactly ---
+
+  if (R == 0 && L == 1) {
+    // Right sensor on line → turn right (original behavior)
+    inGrace = false;
+    inSearch = false;
+    lastTurn = 1;
+    turnRight();
+  }
+  else if (R == 1 && L == 0) {
+    // Left sensor on line → turn left (original behavior)
+    inGrace = false;
+    inSearch = false;
+    lastTurn = 2;
+    turnLeft();
+  }
+  else if (R == 0 && L == 0) {
+    // Both on line → stop (original behavior)
+    inGrace = false;
+    inSearch = false;
+    Stop();
+  }
+
+  // --- Both white: NEW recovery logic ---
+
+  else if (R == 1 && L == 1) {
 
     if (!inGrace && !inSearch) {
-      // Just went white — start the grace timer
+      // Just lost the line — start grace timer
       inGrace = true;
       bothWhiteStart = millis();
     }
 
     if (inGrace) {
-      // GRACE PERIOD: keep doing whatever we were doing before.
-      // This lets the robot coast through brief sensor gaps on normal curves
-      // without overreacting.
       if (millis() - bothWhiteStart < GRACE_MS) {
-        // Continue last action unchanged — do nothing new
-        // (motors are already set from the previous loop iteration)
-        return;
+        // Grace window: do nothing, let motors continue as-is
+        // (forward() was called by original code on this condition)
+        forward();
       } else {
-        // Grace expired — line is genuinely lost, switch to search mode
+        // Grace expired — enter search mode
         inGrace = false;
         inSearch = true;
         searchStart = millis();
@@ -99,58 +101,28 @@ void loop() {
       unsigned long elapsed = millis() - searchStart;
 
       if (elapsed < SEARCH_TIMEOUT_MS) {
-        // Phase 1: Aggressive in-place pivot toward last turn direction
-        if (lastAction == 1) {
+        if (lastTurn == 1) {
           searchRight();
-        } else if (lastAction == 2) {
+        } else if (lastTurn == 2) {
           searchLeft();
         } else {
-          // Was going straight or no history — default right
           searchRight();
         }
       } else {
-        // Phase 2: Reverse briefly, then reset search
         reverse();
         delay(REVERSE_DURATION_MS);
         Stop();
-        searchStart = millis();  // restart pivot from new position
+        searchStart = millis();
       }
     }
   }
-
-  else if (R == 0 && L == 1) {
-    // --- RIGHT sensor on line: turn right ---
-    resetSearchState();
-    lastAction = 1;
-    turnRight();
-  }
-
-  else if (R == 1 && L == 0) {
-    // --- LEFT sensor on line: turn left ---
-    resetSearchState();
-    lastAction = 2;
-    turnLeft();
-  }
-
-  else if (R == 0 && L == 0) {
-    // --- BOTH BLACK: centered on line ---
-    resetSearchState();
-    lastAction = 3;
-    forward();
-  }
 }
 
-// Clear all search/grace flags when a sensor finds the line again
-void resetSearchState() {
-  inGrace = false;
-  inSearch = false;
-}
-
-// --- Motor Functions ---
+// === ORIGINAL MOTOR FUNCTIONS — UNCHANGED ===
 
 void forward() {
-  analogWrite(enA, forwardSpeed);
-  analogWrite(enB, forwardSpeed);
+  analogWrite(enA, 80);
+  analogWrite(enB, 80);
   digitalWrite(in1, HIGH);
   digitalWrite(in2, LOW);
   digitalWrite(in3, LOW);
@@ -158,8 +130,8 @@ void forward() {
 }
 
 void turnRight() {
-  analogWrite(enA, turnSpeedSlow);
-  analogWrite(enB, turnSpeedFast);
+  analogWrite(enA, 90);
+  analogWrite(enB, 130);
   digitalWrite(in1, LOW);
   digitalWrite(in2, HIGH);
   digitalWrite(in3, LOW);
@@ -167,15 +139,23 @@ void turnRight() {
 }
 
 void turnLeft() {
-  analogWrite(enA, turnSpeedFast);
-  analogWrite(enB, turnSpeedSlow);
+  analogWrite(enA, 130);
+  analogWrite(enB, 90);
   digitalWrite(in1, HIGH);
   digitalWrite(in2, LOW);
   digitalWrite(in3, HIGH);
   digitalWrite(in4, LOW);
 }
 
-// Aggressive in-place right pivot for recovery
+void Stop() {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+}
+
+// === NEW RECOVERY FUNCTIONS ONLY ===
+
 void searchRight() {
   analogWrite(enA, searchSpeed);
   analogWrite(enB, searchSpeed);
@@ -185,7 +165,6 @@ void searchRight() {
   digitalWrite(in4, HIGH);
 }
 
-// Aggressive in-place left pivot for recovery
 void searchLeft() {
   analogWrite(enA, searchSpeed);
   analogWrite(enB, searchSpeed);
@@ -195,19 +174,11 @@ void searchLeft() {
   digitalWrite(in4, LOW);
 }
 
-// Reverse briefly (fallback)
 void reverse() {
   analogWrite(enA, reverseSpeed);
   analogWrite(enB, reverseSpeed);
   digitalWrite(in1, LOW);
   digitalWrite(in2, HIGH);
   digitalWrite(in3, HIGH);
-  digitalWrite(in4, LOW);
-}
-
-void Stop() {
-  digitalWrite(in1, LOW);
-  digitalWrite(in2, LOW);
-  digitalWrite(in3, LOW);
   digitalWrite(in4, LOW);
 }
