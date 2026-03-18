@@ -1,0 +1,247 @@
+/**
+ * Arduino Wall Following Robot with PID Control
+ * Uses 2 ultrasonic sensors (front and right) for right-wall following
+ * Tuned for ~60cm wide corridors
+ */
+
+// ===================== PINS =====================
+// Right ultrasonic
+const int trigRight = 13;
+const int echoRight = 8;
+// Front ultrasonic
+const int trigFront = 2;
+const int echoFront = 7;
+// Motor driver (L298N)
+const int enA = 10;   // LEFT motor PWM
+const int enB = 11;   // RIGHT motor PWM
+const int in1 = 6;    // Left motor direction
+const int in2 = 3;    // Left motor direction
+const int in3 = 4;    // Right motor direction
+const int in4 = 5;    // Right motor direction
+
+// ===================== PID CONSTANTS =====================
+float Kp = 0.5;
+float Ki = 0.0;
+float Kd = 0.4;
+
+// ===================== WALL FOLLOWING CONSTANTS =====================
+const int TARGET_DISTANCE = 12;   // Hug right wall at ~12cm
+const int FRONT_THRESHOLD = 25;   // React to front obstacles
+const int MAX_DISTANCE = 200;
+const int BASE_SPEED = 120;
+const int MAX_SPEED = 170;
+const int SEARCH_SPEED = 100;
+
+// ===================== PID VARIABLES =====================
+float lastError = 0;
+float integral = 0;
+
+// ===================== SENSOR VARIABLES =====================
+int distanceFront, distanceRight;
+float filteredFront = MAX_DISTANCE;
+float filteredRight = MAX_DISTANCE;
+
+#define FILTER_FACTOR 0.3
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(enA, OUTPUT);
+  pinMode(enB, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+
+  pinMode(trigFront, OUTPUT);
+  pinMode(echoFront, INPUT);
+  pinMode(trigRight, OUTPUT);
+  pinMode(echoRight, INPUT);
+
+  delay(2000);
+}
+
+void loop() {
+  readSensors();
+  printSensorReadings();
+  followWall();
+  delay(50);
+}
+
+// ===================== SENSOR READING =====================
+int readUltrasonic(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  int distance = duration * 0.034 / 2;
+  if (distance <= 0 || distance > MAX_DISTANCE) distance = MAX_DISTANCE;
+  return distance;
+}
+
+void readSensors() {
+  distanceFront = readUltrasonic(trigFront, echoFront);
+  distanceRight = readUltrasonic(trigRight, echoRight);
+
+  filteredFront = FILTER_FACTOR * filteredFront + (1 - FILTER_FACTOR) * distanceFront;
+  filteredRight = FILTER_FACTOR * filteredRight + (1 - FILTER_FACTOR) * distanceRight;
+}
+
+// Quick unfiltered read — used right after a turn to get fresh data
+int quickReadRight() {
+  return readUltrasonic(trigRight, echoRight);
+}
+
+int quickReadFront() {
+  return readUltrasonic(trigFront, echoFront);
+}
+
+void printSensorReadings() {
+  Serial.print("Front: ");
+  Serial.print(filteredFront);
+  Serial.print(" cm | Right: ");
+  Serial.print(filteredRight);
+  Serial.println(" cm");
+}
+
+// ===================== WALL FOLLOWING LOGIC =====================
+void followWall() {
+  // Priority 1: Obstacle in front → pivot left, then drive forward to re-acquire wall
+  if (filteredFront < FRONT_THRESHOLD) {
+    Serial.println("Obstacle ahead! Pivoting left.");
+    turnLeft();
+    recoverAfterTurn();
+    // Reset PID state
+    lastError = 0;
+    integral = 0;
+    return;
+  }
+
+  // Priority 2: Right wall detected → PID follow it
+  if (filteredRight < 50) {
+    followRightWall();
+  }
+  // Priority 3: No right wall → gentle right curve to find one
+  else {
+    Serial.println("No wall detected, curving right to find wall.");
+    moveForward(SEARCH_SPEED, SEARCH_SPEED / 2);
+  }
+}
+
+/**
+ * After a left pivot, drive forward briefly until the right sensor
+ * picks up a wall again (or until a timeout). This prevents the
+ * "spin in circles" problem where the robot keeps alternating
+ * between pivot-left and curve-right.
+ */
+void recoverAfterTurn() {
+  Serial.println("Recovery: driving forward to re-acquire wall...");
+  unsigned long start = millis();
+  const unsigned long TIMEOUT = 2000;  // Max 2 seconds of recovery driving
+
+  while (millis() - start < TIMEOUT) {
+    int fr = quickReadFront();
+    int rt = quickReadRight();
+
+    // If we're about to hit something in front, bail out and let main loop handle it
+    if (fr < FRONT_THRESHOLD) {
+      Serial.println("Recovery: front obstacle, stopping recovery.");
+      break;
+    }
+
+    // Right wall re-acquired — we're good, resume PID
+    if (rt < 50) {
+      Serial.println("Recovery: wall found, resuming PID.");
+      // Re-seed the filtered value so PID doesn't start with stale data
+      filteredRight = rt;
+      break;
+    }
+
+    // No wall yet — drive forward with slight right bias
+    moveForward(SEARCH_SPEED, SEARCH_SPEED * 3 / 4);
+    delay(50);
+  }
+}
+
+void followRightWall() {
+  float error = TARGET_DISTANCE - filteredRight;
+  // Positive error → too close → steer left
+  // Negative error → too far  → steer right
+
+  integral += error;
+  integral = constrain(integral, -50, 50);
+
+  float derivative = error - lastError;
+
+  float pidOutput = (Kp * error) + (Ki * integral) + (Kd * derivative);
+  pidOutput = constrain(pidOutput, -60, 60);
+
+  int leftSpeed = BASE_SPEED + pidOutput;
+  int rightSpeed = BASE_SPEED - pidOutput;
+
+  leftSpeed = constrain(leftSpeed, 0, MAX_SPEED);
+  rightSpeed = constrain(rightSpeed, 0, MAX_SPEED);
+
+  moveForward(leftSpeed, rightSpeed);
+
+  lastError = error;
+
+  Serial.print("Following right wall | PID: ");
+  Serial.print(pidOutput);
+  Serial.print(" | L/R: ");
+  Serial.print(leftSpeed);
+  Serial.print("/");
+  Serial.println(rightSpeed);
+}
+
+// ===================== MOTOR CONTROL =====================
+void moveForward(int leftSpeed, int rightSpeed) {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, leftSpeed);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+  analogWrite(enB, rightSpeed);
+}
+
+void moveBackward(int speed) {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  analogWrite(enA, speed);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, speed);
+}
+
+void turnLeft() {
+  // Pivot left in place
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  analogWrite(enA, BASE_SPEED);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+  analogWrite(enB, BASE_SPEED);
+  delay(400);  // Adjust for ~90° turn
+}
+
+void turnRight() {
+  // Pivot right in place
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  analogWrite(enA, BASE_SPEED);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+  analogWrite(enB, BASE_SPEED);
+  delay(400);
+}
+
+void stopMotors() {
+  analogWrite(enA, 0);
+  analogWrite(enB, 0);
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+}
