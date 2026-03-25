@@ -1,0 +1,72 @@
+// Arduino Line Follower Robot Code
+#define enA 10
+#define in1 6
+#define in2 3
+#define in3 5
+#define in4 4
+#define enB 11
+#define R_S A1  // Right IR sensor on A1
+#define L_S A0  // Left IR sensor on A0
+
+int motorSpeed = 100;
+int threshold = 500; // Adjust based on your sensors
+
+void setup(){
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  pinMode(enB, OUTPUT);
+  analogWrite(enA, motorSpeed);
+  analogWrite(enB, motorSpeed);
+  delay(1000);
+}
+
+void loop(){
+  int rightVal = analogRead(R_S);
+  int leftVal = analogRead(L_S);
+
+  // Convert analog readings to 1 (white) or 0 (black) using threshold
+  int R = (rightVal > threshold) ? 1 : 0;
+  int L = (leftVal > threshold) ? 1 : 0;
+
+  if((R == 1) && (L == 1)){forward();}
+  if((R == 0) && (L == 1)){turnRight();}
+  if((R == 1) && (L == 0)){turnLeft();}
+  if((R == 0) && (L == 0)){Stop();}  // Fixed: now actually calls Stop
+}
+
+void forward(){
+  analogWrite(enA, 80);
+  analogWrite(enB, 80);
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+}
+
+void turnRight(){
+  analogWrite(enA, 90);
+  analogWrite(enB, 130);
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+}
+
+void turnLeft(){
+  analogWrite(enA, 130);
+  analogWrite(enB, 90);
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+}
+
+void Stop(){
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+}
