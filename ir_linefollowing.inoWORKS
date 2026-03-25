@@ -6,8 +6,8 @@
 #define in3 5 //Motor2  L293 Pin in1 
 #define in4 4 //Motor2  L293 Pin in1 
 #define enB 11 //Enable2 L293 Pin enB 
-#define R_S 12//ir sensor Right
-#define L_S 2 //ir sensor Left
+#define R_S A1//ir sensor Right
+#define L_S A0 //ir sensor Left
 
 int motorSpeed = 100; 
 
